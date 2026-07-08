@@ -1,0 +1,8 @@
+pandas>=3.0
+numpy>=2.4
+scipy>=1.17
+matplotlib>=3.10
+scikit-learn>=1.5
+lightgbm>=4.0
+scikit-surprise>=1.1
+streamlit>=1.38
