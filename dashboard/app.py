@@ -35,9 +35,16 @@ from src.engines import (
     score_by_genre_match,
     GENRE_PROFILES,
 )
+from src.tmdb import fetch_many
+from src.embeddings import load_content_index, get_similar_by_plot
+from src.hybrid import build_hybrid_predict
 
 FEEDBACK_DIR = Path(__file__).resolve().parent.parent / "feedback"
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+# the dashboard runs on the 100k models specifically - 1M is trained and
+# benchmarked separately (see README) but isn't what backs the live demo,
+# mainly so anyone cloning the repo isn't stuck waiting on a slower dataset
+# just to click around
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "ml-100k"
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +75,14 @@ def get_models():
     return popularity_lists, knn, ensemble_predict
 
 
+@st.cache_resource
+def get_content_index():
+    """Content index is optional - built separately via
+    `python -m src.embeddings`. Returns (None, None) if it hasn't been
+    built, and the UI just skips the plot-similarity feature in that case."""
+    return load_content_index(MODELS_DIR)
+
+
 def load_results():
     """Pulls the Test RMSE out of results.txt. Returns None if it's not
     there yet (e.g. training hasn't been run)."""
@@ -87,6 +102,17 @@ def load_eval_history():
         return None
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+def load_feature_importances():
+    path = MODELS_DIR / "feature_importances.pkl"
+    if not path.exists():
+        return None
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def log_row(**fields):
     FEEDBACK_DIR.mkdir(exist_ok=True)
     path = FEEDBACK_DIR / "ratings_log.csv"
     is_new = not path.exists()
@@ -177,6 +203,31 @@ CINEMA_CSS = """
     .movie-row .rank { color: #6b5d4d; font-size: 0.8rem; letter-spacing: 0.08em; }
     .movie-row .title { color: #ece4d8; font-size: 1.05rem; font-family: Georgia, serif; }
 
+    .poster-wrap {
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid #3a2f26;
+    }
+    .poster-placeholder {
+        background: #211a15;
+        border: 1px solid #3a2f26;
+        border-radius: 4px;
+        height: 210px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #4a3f34;
+        font-size: 0.7rem;
+        text-align: center;
+        letter-spacing: 0.06em;
+    }
+    .synopsis {
+        color: #9c8f7d;
+        font-size: 0.82rem;
+        line-height: 1.6;
+        margin-top: 0.3rem;
+    }
+
     .section-label {
         color: #d9b869;
         font-size: 0.78rem;
@@ -250,31 +301,72 @@ movie_info = data["movie_info"]
 user_info = data["user_info"]
 genre_cols = data["genre_cols"]
 popularity_lists, knn, ensemble_predict = get_models()
+content_index, content_movie_ids = get_content_index()
 
 
 def render_recs(recs_df, engine_label, context_key):
     st.markdown('<div class="section-label">Recommended for you</div>', unsafe_allow_html=True)
+
+    titles = recs_df["title"].tolist()
+    try:
+        tmdb_info = fetch_many(titles)
+    except Exception:
+        # missing/invalid API key, no internet, TMDB down - none of that
+        # should take the whole dashboard down, just fall back to text-only
+        tmdb_info = {t: None for t in titles}
+
     for i, row in recs_df.reset_index(drop=True).iterrows():
-        st.markdown(
-            f"""
-            <div class="movie-row">
-                <div class="rank">{str(i + 1).zfill(2)}</div>
-                <div class="title">{row['title']}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        cols = st.columns([4, 1])
-        with cols[0]:
-            rating = st.slider("Rate", 0, 10, 5, key=f"{context_key}_slider_{i}", label_visibility="collapsed")
-        with cols[1]:
-            if st.button("Log", key=f"{context_key}_log_{i}"):
-                log_row(
-                    timestamp=datetime.now().isoformat(timespec="seconds"),
-                    movie_id=int(row["movie_id"]), title=row["title"],
-                    engine_used=engine_label, user_rating=rating,
+        info = tmdb_info.get(row["title"])
+
+        poster_col, detail_col = st.columns([1, 3])
+
+        with poster_col:
+            if info and info.get("poster_url"):
+                st.markdown(
+                    f'<div class="poster-wrap"><img src="{info["poster_url"]}" style="width:100%;"></div>',
+                    unsafe_allow_html=True,
                 )
-                st.toast(f"Logged {rating}/10 for {row['title']}")
+            else:
+                st.markdown('<div class="poster-placeholder">No poster<br>available</div>', unsafe_allow_html=True)
+
+        with detail_col:
+            st.markdown(
+                f"""
+                <div class="movie-row">
+                    <div class="rank">{str(i + 1).zfill(2)}</div>
+                    <div class="title">{row['title']}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if info and info.get("overview"):
+                with st.expander("Synopsis"):
+                    st.markdown(f'<div class="synopsis">{info["overview"]}</div>', unsafe_allow_html=True)
+
+            if content_index is not None:
+                with st.expander("More like this (by plot)"):
+                    similar = get_similar_by_plot(int(row["movie_id"]), content_index, content_movie_ids, movie_info, n=5)
+                    if similar:
+                        for s_title in similar:
+                            st.markdown(f'<div class="synopsis">- {s_title}</div>', unsafe_allow_html=True)
+                    else:
+                        st.caption("No strong plot matches found in the catalog for this title.")
+
+            slider_col, log_col = st.columns([4, 1])
+            with slider_col:
+                rating = st.slider("Rate", 0, 10, 5, key=f"{context_key}_slider_{i}", label_visibility="collapsed")
+            with log_col:
+                if st.button("Log", key=f"{context_key}_log_{i}"):
+                    predicted_score = row["score"] if "score" in row and pd.notna(row["score"]) else ""
+                    log_row(
+                        timestamp=datetime.now().isoformat(timespec="seconds"),
+                        movie_id=int(row["movie_id"]), title=row["title"],
+                        engine_used=engine_label, predicted_score=predicted_score,
+                        user_rating=rating,
+                    )
+                    st.toast(f"Logged {rating}/10 for {row['title']}")
+
+        st.write("")
 
 
 # ---------------------------------------------------------------------------
@@ -304,14 +396,14 @@ with left_col:
     else:
         st.caption("No results.txt found yet - run `python -m src.train` first.")
 
-    eval_history = load_eval_history()
-    if eval_history and "train" in eval_history and "valid" in eval_history:
-        curve_df = pd.DataFrame({
-            "train": eval_history["train"]["rmse"],
-            "valid": eval_history["valid"]["rmse"],
-        })
-        st.caption("Meta-learner boosting curve")
-        st.line_chart(curve_df, height=140)
+    importances = load_feature_importances()
+    if importances:
+        st.caption("What the meta-learner weighs most")
+        imp_df = pd.DataFrame(
+            sorted(importances.items(), key=lambda x: x[1], reverse=True),
+            columns=["feature", "importance"],
+        ).set_index("feature")
+        st.bar_chart(imp_df, height=180)
 
 with right_col:
     trending = popularity_lists["overall"].head(8)["title"].tolist()
@@ -461,7 +553,8 @@ with center_col:
             if st.button("Submit experience rating", key="submit_experience"):
                 log_row(
                     timestamp=datetime.now().isoformat(timespec="seconds"),
-                    movie_id="", title="", engine_used="quiz_experience", user_rating=experience,
+                    movie_id="", title="", engine_used="quiz_experience",
+                    predicted_score="", user_rating=experience,
                 )
                 st.toast("Thanks, logged your experience rating")
 
@@ -494,14 +587,31 @@ with center_col:
         engine_name = "popularity" if rating_count == 0 else "knn" if rating_count < 5 else "ensemble"
         st.write(f"{rating_count} ratings on file, routed to the **{engine_name}** engine.")
 
+        use_hybrid = False
+        if content_index is not None and rating_count >= 5:
+            use_hybrid = st.checkbox(
+                "Blend in content-based signal (plot embeddings)", key="use_hybrid",
+                help="85% collaborative ensemble, 15% synopsis-embedding similarity to the user's highly-rated movies.",
+            )
+
         if st.button("Run recommendation", key="run_advanced"):
+            active_predict = ensemble_predict
+            engine_label = engine_name
+            if use_hybrid:
+                with open(MODELS_DIR / "content_embeddings.pkl", "rb") as f:
+                    content_embeddings = pickle.load(f)
+                active_predict = build_hybrid_predict(
+                    ensemble_predict, train_master, content_movie_ids, content_embeddings
+                )
+                engine_label = "hybrid"
+
             recs = recommend(
                 user_id, train_master, movie_info, popularity_lists, knn,
-                ensemble_predict, user_info=user_info, n=10,
+                active_predict, user_info=user_info, n=10,
             )
             recs_df = pd.DataFrame(recs, columns=["movie_id", "title", "score"])
             st.session_state["advanced_recs"] = recs_df
-            st.session_state["advanced_engine"] = engine_name
+            st.session_state["advanced_engine"] = engine_label
 
         if "advanced_recs" in st.session_state:
             render_recs(

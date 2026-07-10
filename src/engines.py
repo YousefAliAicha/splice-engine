@@ -129,7 +129,10 @@ def get_knn_recs(movie_id, knn, movie_info, n=10):
     row_idx = pivot.index.get_loc(movie_id)
     vec = pivot.iloc[row_idx].values.reshape(1, -1)
 
-    neighbor_idxs = model.kneighbors(vec, n_neighbors=n + 1)[1].flatten()
+    # can't ask for more neighbors than movies that exist - matters for
+    # small or heavily filtered catalogs, not just the full 1682/3706 case
+    k = min(n + 1, len(pivot))
+    neighbor_idxs = model.kneighbors(vec, n_neighbors=k)[1].flatten()
     neighbor_idxs = neighbor_idxs[1:]  # first neighbor is always the movie itself
 
     neighbor_ids = pivot.index[neighbor_idxs]
@@ -322,7 +325,7 @@ def recommend(user_id, train_master, movie_info, popularity_lists, knn, ensemble
         return [(None, t, None) for t in titles]
 
     # 5+ ratings -> full ensemble, scored across every unseen movie
-    candidate_ids = [mid for mid in train_master["movie_id"].unique() if mid not in seen]
+    candidate_ids = [mid for mid in movie_info["movie_id"].unique() if mid not in seen]
     titles_lookup = movie_info.set_index("movie_id")["title"]
 
     scored = [(mid, titles_lookup.get(mid, "Unknown"), ensemble_predict(user_id, mid)) for mid in candidate_ids]
