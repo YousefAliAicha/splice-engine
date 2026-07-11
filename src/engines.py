@@ -150,8 +150,16 @@ def get_base_models(random_state=42):
     # SVDpp was tested and dropped - OOF RMSE of 1.0755, worse than plain
     # Baseline (0.9464). Slowest model in the set by a wide margin too,
     # so cutting it also speeds up every retrain. See README for details.
+    #
+    # SVD hyperparameters below came from src/tune.py (random search, 15
+    # draws, single train/validation split) and gave a genuine improvement:
+    # 0.9725 -> 0.9336 OOF RMSE. iKNN and CoClustering were also searched
+    # but landed within noise of their original settings, so those stayed
+    # as-is rather than introducing single-split-search risk for no real
+    # gain. The meta-learner's tuned config was tried and reverted - see
+    # README engineering decisions for why.
     return {
-        "SVD": SVD(n_factors=200, n_epochs=60, lr_all=0.005, reg_all=0.015, random_state=random_state),
+        "SVD": SVD(n_factors=50, n_epochs=60, lr_all=0.002, reg_all=0.05, random_state=random_state),
         "iKNN": KNNWithMeans(k=40, sim_options={"name": "pearson_baseline", "user_based": False}, verbose=False),
         "Baseline": BaselineOnly(verbose=False),
         "SlopeOne": SlopeOne(),
