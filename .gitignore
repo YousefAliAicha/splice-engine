@@ -43,3 +43,6 @@ feedback/*.csv
 Thumbs.db
 .vscode/
 .idea/
+
+# Local notes - content gets posted as GitHub Issues manually, not committed as a file
+ISSUES.md
